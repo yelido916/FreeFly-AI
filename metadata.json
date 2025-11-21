@@ -1,0 +1,5 @@
+{
+  "name": "FreeFly AI",
+  "description": "AI驱动的创意写作助手和小说管理系统。管理您的故事，生成大纲，并与 Gemini 共同创作章节。",
+  "requestFramePermissions": []
+}
