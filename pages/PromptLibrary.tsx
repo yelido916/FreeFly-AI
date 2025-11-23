@@ -1,16 +1,18 @@
 
 import React, { useState, useEffect } from 'react';
-import { Plus, Trash2, Copy, Edit3, Tag, FileText, Search } from 'lucide-react';
+import { Plus, Trash2, Copy, Edit3, Tag, FileText, Search, Sparkles, Loader2, ArrowRight, FolderPlus } from 'lucide-react';
 import { PromptTemplate, PromptCategory } from '../types';
-import { getPrompts, savePrompt, deletePrompt, generateId } from '../services/storageService';
+import { fetchPrompts, savePrompt, deletePrompt, generateId, fetchPromptCategories, addPromptCategory, deletePromptCategory } from '../services/storageService';
 import { Button, Card, Modal } from '../components/UI';
-
-const CATEGORIES: PromptCategory[] = ['脑洞', '大纲', '卷纲', '细纲', '正文', '简介', '人物', '书名'];
+import { generatePromptTemplate, optimizePromptTemplate } from '../services/geminiService';
 
 export const PromptLibrary: React.FC = () => {
+    const [categories, setCategories] = useState<string[]>([]);
     const [prompts, setPrompts] = useState<PromptTemplate[]>([]);
-    const [selectedCategory, setSelectedCategory] = useState<PromptCategory>('脑洞');
+    const [isLoading, setIsLoading] = useState(true);
+    const [selectedCategory, setSelectedCategory] = useState<string>('脑洞');
     const [searchQuery, setSearchQuery] = useState('');
+    const [newCategoryName, setNewCategoryName] = useState('');
     
     // Modal State
     const [isModalOpen, setIsModalOpen] = useState(false);
@@ -19,33 +21,96 @@ export const PromptLibrary: React.FC = () => {
     // Form State
     const [formTitle, setFormTitle] = useState('');
     const [formContent, setFormContent] = useState('');
-    const [formCategory, setFormCategory] = useState<PromptCategory>('脑洞');
+    const [formCategory, setFormCategory] = useState<string>('脑洞');
+
+    // AI Assistant State
+    const [showAiAssist, setShowAiAssist] = useState(false);
+    const [aiAssistInput, setAiAssistInput] = useState('');
+    const [isGeneratingAiPrompt, setIsGeneratingAiPrompt] = useState(false);
 
     useEffect(() => {
-        loadPrompts();
+        loadData();
     }, []);
 
-    const loadPrompts = () => {
-        setPrompts(getPrompts());
+    const loadData = async () => {
+        setIsLoading(true);
+        try {
+            const [cats, loadedPrompts] = await Promise.all([
+                fetchPromptCategories(),
+                fetchPrompts()
+            ]);
+            setCategories(cats);
+            setPrompts(loadedPrompts);
+            
+            // Validate active category
+            if (!cats.includes(selectedCategory) && cats.length > 0) {
+                setSelectedCategory(cats[0]);
+            }
+        } catch (e) {
+            console.error(e);
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    const handleAddCategory = async () => {
+        if (!newCategoryName.trim()) return;
+        if (categories.includes(newCategoryName.trim())) {
+            alert('分类已存在');
+            return;
+        }
+        await addPromptCategory(newCategoryName.trim());
+        const updatedCats = await fetchPromptCategories();
+        setCategories(updatedCats);
+        setSelectedCategory(newCategoryName.trim());
+        setNewCategoryName('');
+    };
+
+    const handleDeleteCategory = async (e: React.MouseEvent, cat: string) => {
+        e.preventDefault();
+        e.stopPropagation();
+        
+        const promptsInCat = prompts.filter(p => p.category === cat);
+        if (promptsInCat.length > 0) {
+            alert(`无法删除分类“${cat}”，因为它包含 ${promptsInCat.length} 个提示词。\n请先删除或移动分类下的内容。`);
+            return;
+        }
+        
+        if (window.confirm(`确定要删除空分类“${cat}”吗？`)) {
+            await deletePromptCategory(cat);
+            const updatedCats = await fetchPromptCategories();
+            setCategories(updatedCats);
+            // If we deleted the active category, switch to the first available
+            if (selectedCategory === cat) {
+                setSelectedCategory(updatedCats[0] || '');
+            }
+        }
     };
 
     const handleOpenCreate = () => {
         setEditingPrompt(null);
         setFormTitle('');
         setFormContent('');
-        setFormCategory(selectedCategory);
+        // Default to current category if it exists, else first category
+        setFormCategory(selectedCategory && categories.includes(selectedCategory) ? selectedCategory : categories[0]);
+        setShowAiAssist(false);
+        setAiAssistInput('');
         setIsModalOpen(true);
     };
 
-    const handleOpenEdit = (prompt: PromptTemplate) => {
+    const handleOpenEdit = (e: React.MouseEvent, prompt: PromptTemplate) => {
+        e.preventDefault();
+        e.stopPropagation();
         setEditingPrompt(prompt);
         setFormTitle(prompt.title);
         setFormContent(prompt.content);
         setFormCategory(prompt.category);
+        setShowAiAssist(false);
+        setAiAssistInput('');
         setIsModalOpen(true);
     };
 
-    const handleSave = () => {
+    const handleSave = async () => {
         if (!formTitle.trim() || !formContent.trim()) return;
 
         const promptToSave: PromptTemplate = {
@@ -56,21 +121,50 @@ export const PromptLibrary: React.FC = () => {
             createdAt: editingPrompt ? editingPrompt.createdAt : Date.now()
         };
 
-        savePrompt(promptToSave);
-        loadPrompts();
+        await savePrompt(promptToSave);
+        loadData();
         setIsModalOpen(false);
     };
 
-    const handleDelete = (id: string) => {
-        if (confirm('确定要删除这个提示词吗？')) {
-            deletePrompt(id);
-            loadPrompts();
+    const handleDelete = async (e: React.MouseEvent, id: string) => {
+        e.preventDefault();
+        e.stopPropagation();
+        
+        if (window.confirm('确定要删除这个提示词吗？')) {
+            await deletePrompt(id);
+            loadData();
         }
     };
 
-    const handleCopy = (content: string) => {
+    const handleCopy = (e: React.MouseEvent, content: string) => {
+        e.preventDefault();
+        e.stopPropagation();
         navigator.clipboard.writeText(content);
-        // Could add a toast here
+        // Optional: show toast
+    };
+
+    const handleAiAssist = async () => {
+        if (!aiAssistInput.trim()) return;
+        setIsGeneratingAiPrompt(true);
+        try {
+            let result = '';
+            if (!formContent.trim()) {
+                // Generate from scratch
+                result = await generatePromptTemplate(aiAssistInput, formCategory);
+            } else {
+                // Optimize existing
+                result = await optimizePromptTemplate(formContent, aiAssistInput);
+            }
+            
+            if (result) {
+                setFormContent(result);
+                setAiAssistInput(''); // Clear intent after success
+            }
+        } catch (e) {
+            alert('AI 助手暂时繁忙，请重试。');
+        } finally {
+            setIsGeneratingAiPrompt(false);
+        }
     };
 
     const filteredPrompts = prompts.filter(p => 
@@ -89,22 +183,52 @@ export const PromptLibrary: React.FC = () => {
                     </h2>
                 </div>
                 <div className="flex-1 overflow-y-auto p-3 space-y-1">
-                    {CATEGORIES.map(cat => (
-                        <button
-                            key={cat}
-                            onClick={() => setSelectedCategory(cat)}
-                            className={`w-full text-left px-4 py-3 rounded-lg text-sm font-medium transition-colors flex justify-between items-center ${
-                                selectedCategory === cat 
-                                ? 'bg-indigo-50 text-indigo-700' 
-                                : 'text-slate-600 hover:bg-slate-50'
-                            }`}
+                    {isLoading ? (
+                        <div className="flex justify-center py-4"><Loader2 className="animate-spin text-slate-300 w-5 h-5" /></div>
+                    ) : (
+                        categories.map(cat => (
+                            <div
+                                key={cat}
+                                onClick={() => setSelectedCategory(cat)}
+                                className={`w-full px-4 py-3 rounded-lg text-sm font-medium transition-colors flex justify-between items-center cursor-pointer group ${
+                                    selectedCategory === cat 
+                                    ? 'bg-indigo-50 text-indigo-700' 
+                                    : 'text-slate-600 hover:bg-slate-50'
+                                }`}
+                            >
+                                <span className="truncate mr-2">{cat}</span>
+                                <div className="flex items-center">
+                                    <span className={`text-xs px-2 py-0.5 rounded-full mr-1 ${selectedCategory === cat ? 'bg-white/50 text-indigo-500' : 'bg-slate-100 text-slate-400'}`}>
+                                        {prompts.filter(p => p.category === cat).length}
+                                    </span>
+                                    <button 
+                                        onClick={(e) => handleDeleteCategory(e, cat)}
+                                        className="p-1 text-slate-400 hover:text-red-500 transition-colors opacity-0 group-hover:opacity-100 focus:opacity-100"
+                                        title="删除分类"
+                                    >
+                                        <Trash2 className="w-3 h-3 pointer-events-none" />
+                                    </button>
+                                </div>
+                            </div>
+                        ))
+                    )}
+                </div>
+                <div className="p-3 border-t border-slate-100">
+                    <div className="flex gap-2">
+                        <input 
+                            value={newCategoryName}
+                            onChange={(e) => setNewCategoryName(e.target.value)}
+                            placeholder="新分类名称"
+                            className="flex-1 px-2 py-1.5 text-sm border border-slate-200 rounded focus:outline-none focus:border-indigo-500"
+                        />
+                        <button 
+                            onClick={handleAddCategory}
+                            disabled={!newCategoryName.trim()}
+                            className="p-2 bg-indigo-50 text-indigo-600 rounded hover:bg-indigo-100 disabled:opacity-50"
                         >
-                            {cat}
-                            <span className="text-xs bg-white/50 px-2 py-0.5 rounded-full text-slate-400">
-                                {prompts.filter(p => p.category === cat).length}
-                            </span>
+                            <FolderPlus className="w-4 h-4" />
                         </button>
-                    ))}
+                    </div>
                 </div>
             </div>
 
@@ -132,7 +256,9 @@ export const PromptLibrary: React.FC = () => {
 
                 {/* List */}
                 <div className="flex-1 overflow-y-auto p-8">
-                    {filteredPrompts.length === 0 ? (
+                    {isLoading ? (
+                         <div className="flex justify-center py-20"><Loader2 className="animate-spin text-indigo-500 w-8 h-8" /></div>
+                    ) : filteredPrompts.length === 0 ? (
                         <div className="text-center py-20 text-slate-400">
                             <FileText className="w-12 h-12 mx-auto mb-3 opacity-20" />
                             <p>该分类下暂无提示词</p>
@@ -143,20 +269,20 @@ export const PromptLibrary: React.FC = () => {
                                 <div key={prompt.id} className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm hover:shadow-md transition-shadow flex flex-col group">
                                     <div className="flex justify-between items-start mb-3">
                                         <h4 className="font-bold text-slate-800 text-lg">{prompt.title}</h4>
-                                        <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                                        <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity focus-within:opacity-100">
                                             <button 
-                                                onClick={() => handleOpenEdit(prompt)}
+                                                onClick={(e) => handleOpenEdit(e, prompt)}
                                                 className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded"
                                                 title="编辑"
                                             >
-                                                <Edit3 className="w-4 h-4" />
+                                                <Edit3 className="w-4 h-4 pointer-events-none" />
                                             </button>
                                             <button 
-                                                onClick={() => handleDelete(prompt.id)}
+                                                onClick={(e) => handleDelete(e, prompt.id)}
                                                 className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded"
                                                 title="删除"
                                             >
-                                                <Trash2 className="w-4 h-4" />
+                                                <Trash2 className="w-4 h-4 pointer-events-none" />
                                             </button>
                                         </div>
                                     </div>
@@ -165,10 +291,10 @@ export const PromptLibrary: React.FC = () => {
                                     </div>
                                     <div className="flex justify-end pt-2 border-t border-slate-100">
                                         <button 
-                                            onClick={() => handleCopy(prompt.content)}
+                                            onClick={(e) => handleCopy(e, prompt.content)}
                                             className="text-xs font-medium text-indigo-600 hover:text-indigo-800 flex items-center gap-1"
                                         >
-                                            <Copy className="w-3 h-3" /> 复制内容
+                                            <Copy className="w-3 h-3 pointer-events-none" /> 复制内容
                                         </button>
                                     </div>
                                 </div>
@@ -199,15 +325,57 @@ export const PromptLibrary: React.FC = () => {
                             <label className="block text-sm font-medium text-slate-700 mb-1">分类</label>
                             <select 
                                 value={formCategory}
-                                onChange={(e) => setFormCategory(e.target.value as PromptCategory)}
+                                onChange={(e) => setFormCategory(e.target.value as string)}
                                 className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none"
                             >
-                                {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+                                {categories.map(c => <option key={c} value={c}>{c}</option>)}
                             </select>
                         </div>
                     </div>
                     <div>
-                        <label className="block text-sm font-medium text-slate-700 mb-1">提示词内容</label>
+                        <div className="flex justify-between items-center mb-1">
+                            <label className="block text-sm font-medium text-slate-700">提示词内容</label>
+                            <button 
+                                onClick={() => setShowAiAssist(!showAiAssist)}
+                                className={`text-xs flex items-center gap-1 transition-colors ${showAiAssist ? 'text-indigo-600 font-bold' : 'text-slate-500 hover:text-indigo-600'}`}
+                            >
+                                <Sparkles className="w-3 h-3" />
+                                {showAiAssist ? '收起 AI 助手' : '✨ AI 帮写/优化'}
+                            </button>
+                        </div>
+
+                        {/* AI Assist Panel */}
+                        {showAiAssist && (
+                            <div className="mb-3 p-3 bg-indigo-50 border border-indigo-100 rounded-lg animate-fade-in">
+                                <div className="flex gap-2">
+                                    <input 
+                                        value={aiAssistInput}
+                                        onChange={(e) => setAiAssistInput(e.target.value)}
+                                        placeholder={
+                                            !formContent.trim() 
+                                            ? "描述您的需求（例如：帮我写一个...）..." 
+                                            : "输入修改建议（例如：让语气更幽默、增加反派细节）..."
+                                        }
+                                        className="flex-1 px-3 py-2 text-sm border border-indigo-200 rounded-md focus:ring-1 focus:ring-indigo-500 outline-none"
+                                        onKeyDown={(e) => e.key === 'Enter' && handleAiAssist()}
+                                    />
+                                    <Button 
+                                        size="sm" 
+                                        onClick={handleAiAssist} 
+                                        disabled={!aiAssistInput.trim() || isGeneratingAiPrompt}
+                                        className="whitespace-nowrap"
+                                    >
+                                        {isGeneratingAiPrompt ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowRight className="w-4 h-4" />}
+                                    </Button>
+                                </div>
+                                <p className="text-[10px] text-indigo-400 mt-1 ml-1">
+                                    {!formContent.trim() 
+                                        ? "AI 将为您生成专业的提示词模板。" 
+                                        : "AI 将根据您的建议优化现有内容。"}
+                                </p>
+                            </div>
+                        )}
+
                         <textarea 
                             value={formContent}
                             onChange={(e) => setFormContent(e.target.value)}

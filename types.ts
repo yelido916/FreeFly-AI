@@ -32,7 +32,7 @@ export interface Novel {
   knowledgeEntries: KnowledgeEntry[];
 }
 
-export type PromptCategory = '脑洞' | '大纲' | '卷纲' | '细纲' | '正文' | '简介' | '人物' | '书名';
+export type PromptCategory = string;
 
 export interface PromptTemplate {
   id: string;
@@ -42,7 +42,13 @@ export interface PromptTemplate {
   createdAt: number;
 }
 
-export type AIModel = 'gemini-2.5-flash';
+export interface UsageStats {
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  dailyStats: Record<string, { input: number; output: number }>; // Key is YYYY-MM-DD
+}
+
+export type AIModel = 'gemini-3-pro-preview';
 
 export interface GenerationConfig {
   creativity: number; // temperature

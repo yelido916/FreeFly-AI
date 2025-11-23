@@ -1,171 +1,376 @@
 
-import { Novel, Chapter, KnowledgeCategory, PromptTemplate, PromptCategory } from '../types';
+import { Novel, Chapter, KnowledgeCategory, PromptTemplate, PromptCategory, UsageStats } from '../types';
 
 const STORAGE_KEY = 'inkflow_novels_v1';
 const PROMPTS_STORAGE_KEY = 'inkflow_prompts_v1';
+const PROMPT_CATEGORIES_KEY = 'inkflow_prompt_categories_v1';
+const STATS_STORAGE_KEY = 'inkflow_stats_v1';
+
+// Configuration
+const SERVER_CONFIG_KEY = 'inkflow_server_config';
+
+interface ServerConfig {
+    useServer: boolean;
+    serverUrl: string;
+}
+
+export const getServerConfig = (): ServerConfig => {
+    try {
+        const data = localStorage.getItem(SERVER_CONFIG_KEY);
+        return data ? JSON.parse(data) : { useServer: false, serverUrl: 'http://localhost:3001' };
+    } catch {
+        return { useServer: false, serverUrl: 'http://localhost:3001' };
+    }
+};
+
+export const saveServerConfig = (config: ServerConfig) => {
+    localStorage.setItem(SERVER_CONFIG_KEY, JSON.stringify(config));
+};
+
+// Helper to decide fetch method
+const isServerMode = () => getServerConfig().useServer;
+const getApiUrl = () => getServerConfig().serverUrl;
+
+// Helper to safely read local storage
+const readLocal = <T>(key: string, defaultVal: T): T => {
+    try {
+        const data = localStorage.getItem(key);
+        return data ? JSON.parse(data) : defaultVal;
+    } catch {
+        return defaultVal;
+    }
+};
 
 // --- Novels ---
 
-export const getNovels = (): Novel[] => {
-  try {
-    const data = localStorage.getItem(STORAGE_KEY);
-    return data ? JSON.parse(data) : [];
-  } catch (e) {
-    console.error('Failed to load novels', e);
-    return [];
-  }
+export const fetchNovels = async (): Promise<Novel[]> => {
+    if (isServerMode()) {
+        try {
+            const res = await fetch(`${getApiUrl()}/api/novels`);
+            if (!res.ok) throw new Error('Failed to fetch from server');
+            return await res.json();
+        } catch (e) {
+            // Use console.warn instead of error for fallback scenarios to avoid "Failed to fetch" spam
+            console.warn("Server unreachable, falling back to local storage.");
+            return readLocal<Novel[]>(STORAGE_KEY, []);
+        }
+    } else {
+        return readLocal<Novel[]>(STORAGE_KEY, []);
+    }
 };
 
-export const saveNovel = (novel: Novel): void => {
-  const novels = getNovels();
-  const index = novels.findIndex((n) => n.id === novel.id);
-  if (index >= 0) {
-    novels[index] = { ...novel, updatedAt: Date.now() };
-  } else {
-    novels.push({ ...novel, updatedAt: Date.now() });
-  }
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(novels));
+export const saveNovel = async (novel: Novel): Promise<void> => {
+    const updatedNovel = { ...novel, updatedAt: Date.now() };
+    
+    // Always save to local as a backup/cache first or parallel
+    const saveToLocal = () => {
+         const novels = readLocal<Novel[]>(STORAGE_KEY, []);
+         const index = novels.findIndex((n) => n.id === novel.id);
+         if (index >= 0) {
+             novels[index] = updatedNovel;
+         } else {
+             novels.push(updatedNovel);
+         }
+         localStorage.setItem(STORAGE_KEY, JSON.stringify(novels));
+    };
+
+    if (isServerMode()) {
+        try {
+            await fetch(`${getApiUrl()}/api/novels`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(updatedNovel)
+            });
+            // Also sync to local to keep them in sync if we fallback later
+            saveToLocal();
+        } catch (e) {
+            console.warn("Server save failed, saved to local only.");
+            saveToLocal();
+            // We don't throw here to prevent UI disruption
+        }
+    } else {
+        saveToLocal();
+    }
 };
 
-export const deleteNovel = (id: string): void => {
-  const novels = getNovels().filter((n) => n.id !== id);
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(novels));
+export const deleteNovel = async (id: string): Promise<void> => {
+     const deleteLocal = () => {
+        let novels = readLocal<Novel[]>(STORAGE_KEY, []);
+        novels = novels.filter((n) => n.id !== id);
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(novels));
+    };
+
+    if (isServerMode()) {
+        try {
+            await fetch(`${getApiUrl()}/api/novels/${id}`, { method: 'DELETE' });
+            deleteLocal();
+        } catch(e) {
+            console.warn("Server delete failed, deleting locally.");
+            deleteLocal();
+        }
+    } else {
+        deleteLocal();
+    }
 };
 
-export const getNovelById = (id: string): Novel | undefined => {
-  return getNovels().find((n) => n.id === id);
+export const fetchNovelById = async (id: string): Promise<Novel | undefined> => {
+    let serverNovel: Novel | undefined;
+    if (isServerMode()) {
+        try {
+            const res = await fetch(`${getApiUrl()}/api/novels/${id}`);
+            if (res.ok) {
+                serverNovel = await res.json();
+            }
+        } catch (e) {
+            console.warn("Fetch ID from server failed, checking local.");
+        }
+    }
+    
+    if (serverNovel) return serverNovel;
+
+    // Fallback
+    const novels = readLocal<Novel[]>(STORAGE_KEY, []);
+    return novels.find((n) => n.id === id);
 };
 
 // --- Prompts ---
 
-const DEFAULT_PROMPTS: Omit<PromptTemplate, 'id' | 'createdAt'>[] = [
-    {
-        title: "创意风暴",
-        category: "脑洞",
-        content: "请基于以下关键词：[关键词1]、[关键词2]，提供3个截然不同的小说核心创意（High Concept）。每个创意包含：核心冲突、独特卖点、一句话梗概。"
-    },
-    {
-        title: "三幕式大纲",
-        category: "大纲",
-        content: "请使用经典的三幕式结构（铺垫、对抗、结局）为一部关于[主题]的小说撰写大纲。重点描述情节点（Plot Points）和角色的弧光变化。"
-    },
-    {
-        title: "章节细纲生成",
-        category: "细纲",
-        content: "当前章节的目标是[目标]。请为这一章列出5-7个具体的场景节拍（Beats），包括对话焦点、动作描写和情感转折。"
-    },
-    {
-        title: "沉浸式描写",
-        category: "正文",
-        content: "请扩写以下场景：[场景简述]。要求运用“展示而非讲述”（Show, Don't Tell）的技巧，调动五感（视觉、听觉、嗅觉等），侧重于氛围渲染和人物的潜台词。"
-    },
-    {
-        title: "反派设计",
-        category: "人物",
-        content: "请设计一个名为[名字]的反派角色。不要让他仅仅是“邪恶”的，请给出他扭曲的价值观来源、一个令人同情的弱点，以及他与主角的镜像关系。"
-    },
-    {
-        title: "吸引人的书名",
-        category: "书名",
-        content: "这本小说关于[核心内容]。请生成10个书名，分为三种风格：1. 网文热血风；2. 出版文艺风；3. 悬疑极其抓人眼球风。"
-    }
-];
+const DEFAULT_CATEGORIES = ['脑洞', '大纲', '卷纲', '细纲', '正文', '简介', '人物', '书名'];
 
-export const getPrompts = (): PromptTemplate[] => {
-    try {
-        const data = localStorage.getItem(PROMPTS_STORAGE_KEY);
-        if (!data) {
-            // Initialize defaults
-            const defaults = DEFAULT_PROMPTS.map(p => ({
-                ...p,
-                id: generateId(),
-                createdAt: Date.now()
-            }));
-            localStorage.setItem(PROMPTS_STORAGE_KEY, JSON.stringify(defaults));
-            return defaults as PromptTemplate[];
+// Removed DEFAULT_PROMPTS to ensure library starts empty
+
+export const fetchPromptCategories = async (): Promise<string[]> => {
+    if (isServerMode()) {
+        try {
+            const res = await fetch(`${getApiUrl()}/api/prompt-categories`);
+            if(res.ok) return await res.json();
+        } catch {}
+    }
+    
+    const local = readLocal<string[]>(PROMPT_CATEGORIES_KEY, []);
+    if (local.length === 0) {
+         localStorage.setItem(PROMPT_CATEGORIES_KEY, JSON.stringify(DEFAULT_CATEGORIES));
+         return DEFAULT_CATEGORIES;
+    }
+    return local;
+};
+
+export const addPromptCategory = async (name: string): Promise<void> => {
+     const addLocal = () => {
+        const cats = readLocal<string[]>(PROMPT_CATEGORIES_KEY, DEFAULT_CATEGORIES);
+        if (!cats.includes(name)) {
+            cats.push(name);
+            localStorage.setItem(PROMPT_CATEGORIES_KEY, JSON.stringify(cats));
         }
-        return JSON.parse(data);
-    } catch (e) {
-        return [];
-    }
-};
+    };
 
-export const savePrompt = (prompt: PromptTemplate): void => {
-    const prompts = getPrompts();
-    const index = prompts.findIndex(p => p.id === prompt.id);
-    if (index >= 0) {
-        prompts[index] = { ...prompt }; // Update
+    if (isServerMode()) {
+        try {
+            await fetch(`${getApiUrl()}/api/prompt-categories`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name })
+            });
+            addLocal();
+        } catch { addLocal(); }
     } else {
-        prompts.push({ ...prompt }); // Create
+        addLocal();
     }
-    localStorage.setItem(PROMPTS_STORAGE_KEY, JSON.stringify(prompts));
 };
 
-export const deletePrompt = (id: string): void => {
-    const prompts = getPrompts().filter(p => p.id !== id);
-    localStorage.setItem(PROMPTS_STORAGE_KEY, JSON.stringify(prompts));
+export const deletePromptCategory = async (name: string): Promise<void> => {
+    const delLocal = () => {
+        let cats = readLocal<string[]>(PROMPT_CATEGORIES_KEY, DEFAULT_CATEGORIES);
+        cats = cats.filter(c => c !== name);
+        localStorage.setItem(PROMPT_CATEGORIES_KEY, JSON.stringify(cats));
+    };
+
+    if (isServerMode()) {
+        try {
+             await fetch(`${getApiUrl()}/api/prompt-categories/${name}`, { method: 'DELETE' });
+             delLocal();
+        } catch { delLocal(); }
+    } else {
+        delLocal();
+    }
+};
+
+export const fetchPrompts = async (): Promise<PromptTemplate[]> => {
+    if (isServerMode()) {
+        try {
+            const res = await fetch(`${getApiUrl()}/api/prompts`);
+            if (res.ok) return await res.json();
+        } catch {}
+    }
+
+    // Return local or empty array. Do NOT seed with defaults.
+    return readLocal<PromptTemplate[]>(PROMPTS_STORAGE_KEY, []);
+};
+
+export const savePrompt = async (prompt: PromptTemplate): Promise<void> => {
+    const saveLocal = () => {
+        const prompts = readLocal<PromptTemplate[]>(PROMPTS_STORAGE_KEY, []);
+        const index = prompts.findIndex(p => p.id === prompt.id);
+        if (index >= 0) {
+            prompts[index] = { ...prompt };
+        } else {
+            prompts.push({ ...prompt });
+        }
+        localStorage.setItem(PROMPTS_STORAGE_KEY, JSON.stringify(prompts));
+    };
+
+    if (isServerMode()) {
+        try {
+            await fetch(`${getApiUrl()}/api/prompts`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(prompt)
+            });
+            saveLocal();
+        } catch { saveLocal(); }
+    } else {
+        saveLocal();
+    }
+};
+
+export const deletePrompt = async (id: string): Promise<void> => {
+    const delLocal = () => {
+        let prompts = readLocal<PromptTemplate[]>(PROMPTS_STORAGE_KEY, []);
+        prompts = prompts.filter(p => p.id !== id);
+        localStorage.setItem(PROMPTS_STORAGE_KEY, JSON.stringify(prompts));
+    };
+
+    if (isServerMode()) {
+        try {
+            await fetch(`${getApiUrl()}/api/prompts/${id}`, { method: 'DELETE' });
+            delLocal();
+        } catch { delLocal(); }
+    } else {
+        delLocal();
+    }
+};
+
+// --- Usage Stats ---
+
+const getTodayString = () => new Date().toISOString().split('T')[0];
+
+export const fetchUsageStats = async (): Promise<UsageStats> => {
+    const defaultStats: UsageStats = {
+        totalInputTokens: 0,
+        totalOutputTokens: 0,
+        dailyStats: {}
+    };
+
+    let serverStats;
+    if (isServerMode()) {
+        try {
+            const res = await fetch(`${getApiUrl()}/api/stats`);
+            if (res.ok) serverStats = await res.json();
+        } catch {}
+    }
+
+    if (serverStats) return serverStats;
+    
+    return readLocal(STATS_STORAGE_KEY, defaultStats);
+};
+
+export const incrementUsageStats = async (inputTokens: number, outputTokens: number): Promise<void> => {
+    // Get current (local or server, falling back to local)
+    let stats = await fetchUsageStats();
+    const today = getTodayString();
+
+    // Update Totals
+    stats.totalInputTokens += inputTokens;
+    stats.totalOutputTokens += outputTokens;
+
+    // Update Daily
+    if (!stats.dailyStats[today]) {
+        stats.dailyStats[today] = { input: 0, output: 0 };
+    }
+    stats.dailyStats[today].input += inputTokens;
+    stats.dailyStats[today].output += outputTokens;
+
+    // Save
+    const saveLocal = () => localStorage.setItem(STATS_STORAGE_KEY, JSON.stringify(stats));
+
+    if (isServerMode()) {
+        try {
+            await fetch(`${getApiUrl()}/api/stats`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(stats)
+            });
+            saveLocal(); // Sync backup
+        } catch (e) {
+            saveLocal();
+        }
+    } else {
+        saveLocal();
+    }
 };
 
 // --- Backup & Restore ---
 
-export const createBackup = (): string => {
+export const createBackup = async (): Promise<string> => {
+    const novels = await fetchNovels();
+    const prompts = await fetchPrompts();
+    const promptCategories = await fetchPromptCategories();
+    const stats = await fetchUsageStats();
+    
     const backup = {
         version: 1,
         timestamp: Date.now(),
-        novels: getNovels(),
-        prompts: getPrompts()
+        novels,
+        prompts,
+        promptCategories,
+        stats
     };
     return JSON.stringify(backup, null, 2);
 };
 
-export const restoreBackup = (jsonString: string): { success: boolean, message: string } => {
+export const restoreBackup = async (jsonString: string): Promise<{ success: boolean, message: string }> => {
     try {
         const data = JSON.parse(jsonString);
         
         if (!data.novels && !data.prompts) {
-            return { success: false, message: '无效的备份文件格式：未找到小说或提示词数据。' };
+            return { success: false, message: '无效的备份文件格式。' };
         }
-
-        // Merge Novels
-        const currentNovels = getNovels();
-        const currentPrompts = getPrompts();
-
-        let newNovelsCount = 0;
-        let updatedNovelsCount = 0;
-        let newPromptsCount = 0;
-
+        
         if (data.novels && Array.isArray(data.novels)) {
-            data.novels.forEach((n: Novel) => {
-                const idx = currentNovels.findIndex(cn => cn.id === n.id);
-                if (idx === -1) {
-                    currentNovels.push(n);
-                    newNovelsCount++;
-                } else {
-                    // Overwrite existing with backup version
-                    currentNovels[idx] = n;
-                    updatedNovelsCount++;
-                }
-            });
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(currentNovels));
+            for (const n of data.novels) {
+                await saveNovel(n);
+            }
         }
 
-        // Merge Prompts
         if (data.prompts && Array.isArray(data.prompts)) {
-             data.prompts.forEach((p: PromptTemplate) => {
-                const idx = currentPrompts.findIndex(cp => cp.id === p.id);
-                if (idx === -1) {
-                    currentPrompts.push(p);
-                    newPromptsCount++;
-                } else {
-                    currentPrompts[idx] = p;
-                }
-             });
-             localStorage.setItem(PROMPTS_STORAGE_KEY, JSON.stringify(currentPrompts));
+             for (const p of data.prompts) {
+                 await savePrompt(p);
+             }
+        }
+
+        if (data.promptCategories && Array.isArray(data.promptCategories)) {
+            for (const c of data.promptCategories) {
+                await addPromptCategory(c);
+            }
+        }
+        
+        if (data.stats) {
+             // For stats, we can't easily "merge" via save methods without logic, so we just force write to local/server
+             if (isServerMode()) {
+                 try {
+                    await fetch(`${getApiUrl()}/api/stats`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(data.stats)
+                    });
+                 } catch {}
+             }
+             localStorage.setItem(STATS_STORAGE_KEY, JSON.stringify(data.stats));
         }
 
         return { 
             success: true, 
-            message: `恢复成功！\n新增小说: ${newNovelsCount} 本\n更新小说: ${updatedNovelsCount} 本\n新增提示词: ${newPromptsCount} 条` 
+            message: `恢复操作完成！(数据已写入)` 
         };
 
     } catch (e) {

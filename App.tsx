@@ -1,9 +1,11 @@
+
 import React from 'react';
 import { HashRouter, Routes, Route, Navigate, useNavigate, useLocation, Link, useParams } from 'react-router-dom';
 import { NovelLibrary } from './pages/NovelLibrary';
 import { PromptLibrary } from './pages/PromptLibrary';
 import { NovelEditor } from './pages/NovelEditor';
-import { BookOpen, FileText, Sparkles } from 'lucide-react';
+import { HelpCenter } from './pages/HelpCenter';
+import { BookOpen, FileText, Sparkles, HelpCircle } from 'lucide-react';
 
 // --- Layout Components ---
 
@@ -34,6 +36,13 @@ const NavBar: React.FC = () => {
                     >
                         <FileText className="w-4 h-4" />
                         提示词库
+                    </Link>
+                    <Link 
+                        to="/help" 
+                        className={`px-4 py-2 rounded-lg text-sm font-medium transition-all flex items-center gap-2 ${isActive('/help') ? 'bg-indigo-50 text-indigo-700' : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'}`}
+                    >
+                        <HelpCircle className="w-4 h-4" />
+                        帮助与统计
                     </Link>
                 </nav>
             </div>
@@ -82,6 +91,13 @@ const AppContent: React.FC = () => {
             <Route path="/prompts" element={
                 <DashboardLayout>
                     <PromptLibrary />
+                </DashboardLayout>
+            } />
+
+            {/* Help Center Route */}
+            <Route path="/help" element={
+                <DashboardLayout>
+                    <HelpCenter />
                 </DashboardLayout>
             } />
 
